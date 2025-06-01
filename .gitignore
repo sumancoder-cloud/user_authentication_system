@@ -1,0 +1,69 @@
+# Configuration files
+config.php
+.env
+
+# Dependencies
+/vendor/
+/node_modules/
+composer.lock
+
+# Logs
+*.log
+error_log
+access_log
+
+# Cache files
+*.cache
+*.tmp
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Session files
+*.sess
+sessions/
+
+# IDE files
+.idea/
+.vscode/
+*.sublime-*
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+*.temp
+
+# Security
+*.pem
+*.key
+*.crt
+*.csr
+*.srl
+
+# Build files
+/build/
+/dist/
+
+# Test files
+/tests/coverage/
+.phpunit.result.cache
+
+# Other
+*.zip
+*.tar.gz
+*.rar
+npm-debug.log
+yarn-debug.log
+yarn-error.log 
