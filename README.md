@@ -195,7 +195,7 @@ The system includes comprehensive error handling and logging:
 
 ## License
 
-This project is licensed under the MIT License - see the create [LICENSE.md](createLICENSE.md) for details.
+This project is licensed under the MIT License - see the create [LICENSE.md] for details.
 
 ## Support
 
