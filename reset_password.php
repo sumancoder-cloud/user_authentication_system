@@ -43,7 +43,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (storeOTP($email, $otp, 'password_reset')) {
                     // Send OTP email
                     $emailHandler = new EmailHandler();
-                    if ($emailHandler->sendOTP($email, $otp, 'password_reset')) {
+                    if ($emailHandler->sendOTPEmail($email, $otp, 'password_reset')) {
                         // Store email in session for security
                         $_SESSION['reset_email'] = $email;
                         $_SESSION['reset_time'] = time();
@@ -328,7 +328,7 @@ $showOtpForm = isset($_SESSION['reset_email']) && isset($_SESSION['reset_time'])
 <body>
     <div class="reset-container">
         <!-- Request Reset Form -->
-        <form id="requestResetForm" method="POST" style="display: <?php echo $showOtpForm ? 'none' : 'block'; ?>">
+        <form id="requestResetForm" method="POST" action="<?php echo htmlspecialchars($_SERVER['PHP_SELF']); ?>" style="display: <?php echo $showOtpForm ? 'none' : 'block'; ?>">
             <input type="hidden" name="action" value="request_reset">
             <h2>Reset Password</h2>
             <div class="error-message" id="requestError"></div>
@@ -343,26 +343,26 @@ $showOtpForm = isset($_SESSION['reset_email']) && isset($_SESSION['reset_time'])
             <button type="submit" id="requestButton">Send Reset Code</button>
             
             <div class="back-link">
-                <a href="login.php">Back to Login</a>
+                <a href="<?php echo dirname($_SERVER['PHP_SELF']); ?>/login.php">Back to Login</a>
             </div>
         </form>
 
         <!-- OTP Verification Form -->
-        <form id="otpForm" class="otp-container" method="POST" style="display: <?php echo $showOtpForm ? 'block' : 'none'; ?>">
+        <form id="otpForm" method="POST" action="<?php echo htmlspecialchars($_SERVER['PHP_SELF']); ?>" style="display: <?php echo $showOtpForm ? 'block' : 'none'; ?>">
             <input type="hidden" name="action" value="verify_otp">
             <h2>Enter Verification Code</h2>
             <div class="error-message" id="otpError"></div>
             <div class="success-message" id="otpSuccess"></div>
             
             <div class="form-group">
-                <label for="otp">Enter the 6-digit code sent to your email</label>
+                <label for="otp">Verification Code</label>
                 <div class="otp-inputs">
-                    <input type="text" maxlength="1" pattern="[0-9]" inputmode="numeric" required>
-                    <input type="text" maxlength="1" pattern="[0-9]" inputmode="numeric" required>
-                    <input type="text" maxlength="1" pattern="[0-9]" inputmode="numeric" required>
-                    <input type="text" maxlength="1" pattern="[0-9]" inputmode="numeric" required>
-                    <input type="text" maxlength="1" pattern="[0-9]" inputmode="numeric" required>
-                    <input type="text" maxlength="1" pattern="[0-9]" inputmode="numeric" required>
+                    <input type="text" maxlength="1" pattern="[0-9]" inputmode="numeric" name="otp[]" required>
+                    <input type="text" maxlength="1" pattern="[0-9]" inputmode="numeric" name="otp[]" required>
+                    <input type="text" maxlength="1" pattern="[0-9]" inputmode="numeric" name="otp[]" required>
+                    <input type="text" maxlength="1" pattern="[0-9]" inputmode="numeric" name="otp[]" required>
+                    <input type="text" maxlength="1" pattern="[0-9]" inputmode="numeric" name="otp[]" required>
+                    <input type="text" maxlength="1" pattern="[0-9]" inputmode="numeric" name="otp[]" required>
                 </div>
             </div>
             

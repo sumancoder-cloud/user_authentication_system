@@ -1,6 +1,7 @@
 <?php
 require_once 'config.php';
 require_once 'auth.php';
+require_once 'google_config.php';
 
 // Initialize session if not already started
 if (session_status() === PHP_SESSION_NONE) {
@@ -48,6 +49,13 @@ if ($check_result) {
     error_log("Error checking users: " . mysqli_error($conn));
 }
 error_log("=== End of Database Check ===");
+
+// Add this at the top of the file after require statements
+if (isset($_GET['code'])) {
+    // Handle Google OAuth callback directly in login page
+    require_once 'google_callback.php';
+    exit();
+}
 
 // Process login form
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
@@ -430,6 +438,88 @@ $page_title = "Login - Addwise";
         .error-message.role-error {
             margin-bottom: 20px;
         }
+        
+        .google-signin-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            width: 100%;
+            padding: 12px;
+            background: #4285f4;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin-top: 20px;
+            text-decoration: none;
+        }
+        
+        .google-signin-btn:hover {
+            background: #357abd;
+            transform: translateY(-2px);
+        }
+        
+        .google-signin-btn img {
+            width: 20px;
+            height: 20px;
+        }
+        
+        .divider {
+            display: flex;
+            align-items: center;
+            text-align: center;
+            margin: 20px 0;
+            color: #666;
+        }
+        
+        .divider::before,
+        .divider::after {
+            content: '';
+            flex: 1;
+            border-bottom: 1px solid #ddd;
+        }
+        
+        .divider span {
+            padding: 0 10px;
+        }
+        
+        .google-loading {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        
+        .google-loading-content {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+        }
+        
+        .google-loading-spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #4285f4;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body>
@@ -509,12 +599,29 @@ $page_title = "Login - Addwise";
             </div>
 
             <div class="forgot-password">
-                <a href="reset_password.php">Forgot Password?</a>
+                <a href="<?php echo dirname($_SERVER['PHP_SELF']); ?>/reset_password.php">Forgot Password?</a>
             </div>
 
             <button type="submit" name="login" id="loginButton" disabled>Login</button>
 
             <p class="switch">Don't have an account? <a href="signup.php">Sign Up</a></p>
+
+            <div class="divider"><span>OR</span></div>
+
+            <a href="<?php 
+                // Generate and store state parameter for CSRF protection
+                $_SESSION['oauth_state'] = bin2hex(random_bytes(16));
+                
+                // Set session flag to indicate Google auth started from login
+                $_SESSION['google_auth_started'] = true;
+                $_SESSION['selected_role'] = 'user'; // Default to user role for Google login
+                
+                // Get Google auth URL with state parameter
+                echo getGoogleAuthUrl($_SESSION['oauth_state']);
+            ?>" class="google-signin-btn" onclick="showGoogleLoading()">
+                <img src="https://www.google.com/favicon.ico" alt="Google">
+                Sign in with Google
+            </a>
         </form>
 
         <form id="otpForm" class="otp-container" action="verify_otp.php" method="post"
@@ -558,6 +665,13 @@ $page_title = "Login - Addwise";
                 <a href="#" onclick="return showLoginForm()">Back to login</a>
             </div>
         </form>
+    </div>
+
+    <div id="googleLoading" class="google-loading">
+        <div class="google-loading-content">
+            <div class="google-loading-spinner"></div>
+            <p>Signing in with Google...</p>
+        </div>
     </div>
 
     <script>
@@ -910,6 +1024,39 @@ $page_title = "Login - Addwise";
                 }
             }
         });
+
+        function showGoogleLoading() {
+            const loadingDiv = document.getElementById('googleLoading');
+            if (loadingDiv) {
+                loadingDiv.style.display = 'flex';
+                
+                // Add timeout to show error if loading takes too long
+                setTimeout(() => {
+                    if (loadingDiv.style.display === 'flex') {
+                        loadingDiv.style.display = 'none';
+                        alert('Google sign-in is taking longer than expected. Please try again.');
+                    }
+                }, 30000); // 30 seconds timeout
+            }
+        }
+        
+        // Check for Google OAuth errors in URL
+        if (window.location.search.includes('error=')) {
+            const urlParams = new URLSearchParams(window.location.search);
+            const error = urlParams.get('error');
+            const errorDescription = urlParams.get('error_description');
+            
+            if (error) {
+                alert(handleGoogleError(error, errorDescription));
+                // Clean up URL
+                window.history.replaceState({}, document.title, window.location.pathname);
+            }
+        }
+
+        // Check if we're returning from Google OAuth
+        if (window.location.search.includes('code=')) {
+            showGoogleLoading();
+        }
     </script>
 </body>
 </html>

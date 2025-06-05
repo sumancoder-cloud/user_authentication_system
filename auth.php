@@ -16,6 +16,23 @@ class Auth {
         $this->conn = $conn;
         $this->emailHandler = new EmailHandler();
         $this->startSecureSession();
+
+        // Create email_verification table if it doesn't exist
+        $sql = "CREATE TABLE IF NOT EXISTS email_verification (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id INT NOT NULL,
+            token VARCHAR(255) NOT NULL,
+            created_at DATETIME NOT NULL,
+            verified_at DATETIME DEFAULT NULL,
+            is_verified BOOLEAN DEFAULT FALSE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            INDEX (token),
+            INDEX (created_at)
+        )";
+
+        if (!mysqli_query($conn, $sql)) {
+            error_log("Error creating email_verification table: " . mysqli_error($conn));
+        }
     }
 
     private function startSecureSession() {
@@ -30,10 +47,15 @@ class Auth {
         }
     }
 
-    public function register($name, $username, $email, $password, $role = 'user') {
+    public function register($name, $username, $email, $password, $role = 'user', $is_google = false) {
         try {
-            // Validate input
-            if (!$this->validateRegistrationInput($name, $username, $email, $password)) {
+            // For Google sign-in, always use email as username
+            if ($is_google) {
+                $username = $email;
+            }
+
+            // Validate input with is_google parameter
+            if (!$this->validateRegistrationInput($name, $username, $email, $password, $is_google)) {
                 return ['success' => false, 'message' => 'Invalid input data'];
             }
 
@@ -44,7 +66,6 @@ class Auth {
 
             // Additional validation for admin registration
             if ($role === 'admin') {
-                // Allow specific email address
                 if ($email === 'sumanyadav_tati@srmap.edu.in') {
                     // Allow this specific email
                 } else if (!preg_match('/@srmap\.edu\.in$/', $email)) {
@@ -52,416 +73,263 @@ class Auth {
                 }
             }
 
-            // Check if email exists
+            // Check if email already exists
             if ($this->emailExists($email)) {
                 return ['success' => false, 'message' => 'Email already registered'];
             }
 
-            // Check if username exists
+            // Check if username already exists
             if ($this->usernameExists($username)) {
                 return ['success' => false, 'message' => 'Username already taken'];
             }
 
             // Hash password
             $hashed_password = password_hash($password, PASSWORD_DEFAULT);
-            
-            // Generate verification token
-            $verification_token = bin2hex(random_bytes(32));
-            
-            // Begin transaction
-            mysqli_begin_transaction($this->conn);
-            
-            try {
-                // Insert user with role
-                $sql = "INSERT INTO users (name, username, email, password, role, verification_token, created_at) 
-                        VALUES (?, ?, ?, ?, ?, ?, NOW())";
-                $stmt = mysqli_prepare($this->conn, $sql);
-                mysqli_stmt_bind_param($stmt, "ssssss", $name, $username, $email, $hashed_password, $role, $verification_token);
-                
-                if (!mysqli_stmt_execute($stmt)) {
-                    throw new Exception("Failed to create user account");
-                }
-                
-                $user_id = mysqli_insert_id($this->conn);
-                
-                // Create user preferences
-                $sql = "INSERT INTO user_preferences (user_id) VALUES (?)";
-                $stmt = mysqli_prepare($this->conn, $sql);
-                mysqli_stmt_bind_param($stmt, "i", $user_id);
-                
-                if (!mysqli_stmt_execute($stmt)) {
-                    throw new Exception("Failed to create user preferences");
-                }
-                
-                // Log the registration
-                $this->logAudit($user_id, 'registration', 'User registered successfully with role: ' . $role);
-                
-                // Generate and send OTP
-                $otp = $this->generateOTP($email, 'registration');
-                
-                mysqli_commit($this->conn);
-                
-                return [
-                    'success' => true,
-                    'message' => 'Registration successful. Please verify your email.',
-                    'user_id' => $user_id,
-                    'verification_token' => $verification_token,
-                    'role' => $role
-                ];
-                
-            } catch (Exception $e) {
-                mysqli_rollback($this->conn);
-                throw $e;
+
+            // For Google sign-in, auto-verify email
+            if ($is_google) {
+                $sql = "INSERT INTO users (name, username, email, password, role, email_verified, status, created_at) 
+                        VALUES (?, ?, ?, ?, ?, 1, 'active', NOW())";
+            } else {
+                $sql = "INSERT INTO users (name, username, email, password, role, email_verified, created_at) 
+                        VALUES (?, ?, ?, ?, ?, 0, NOW())";
             }
             
+            $stmt = mysqli_prepare($this->conn, $sql);
+            mysqli_stmt_bind_param($stmt, "sssss", $name, $username, $email, $hashed_password, $role);
+            
+            if (mysqli_stmt_execute($stmt)) {
+                $user_id = mysqli_insert_id($this->conn);
+                
+                if ($is_google) {
+                    // For Google sign-in, no need for OTP
+                    return [
+                        'success' => true,
+                        'message' => 'Registration successful',
+                        'user_id' => $user_id
+                    ];
+                } else {
+                    // Generate and send OTP
+                    $otp_result = $this->generateAndSendOTP($email, 'registration');
+                    
+                    if ($otp_result['success']) {
+                        // Store temporary auth data in session
+                        $_SESSION['temp_auth'] = [
+                            'user_id' => $user_id,
+                            'email' => $email,
+                            'purpose' => 'registration'
+                        ];
+                        
+                        return [
+                            'success' => true,
+                            'message' => 'Registration successful. Please enter the OTP sent to your email.',
+                            'user_id' => $user_id
+                        ];
+                    } else {
+                        // If OTP sending fails, delete the user
+                        $delete_sql = "DELETE FROM users WHERE id = ?";
+                        $delete_stmt = mysqli_prepare($this->conn, $delete_sql);
+                        mysqli_stmt_bind_param($delete_stmt, "i", $user_id);
+                        mysqli_stmt_execute($delete_stmt);
+                        
+                        return [
+                            'success' => false,
+                            'message' => 'Failed to send verification code. Please try again.'
+                        ];
+                    }
+                }
+            } else {
+                return ['success' => false, 'message' => 'Registration failed. Please try again.'];
+            }
         } catch (Exception $e) {
             error_log("Registration error: " . $e->getMessage());
-            return ['success' => false, 'message' => 'Registration failed. Please try again.'];
+            return ['success' => false, 'message' => 'An error occurred during registration.'];
         }
     }
 
-    public function login($username_or_email, $password, $role) {
+    public function login($email, $password) {
         try {
-            error_log("Login attempt for: " . $username_or_email . " with role: " . $role);
-            
             // Check if account is locked
-            if ($this->isAccountLocked($username_or_email)) {
+            if ($this->isAccountLocked($email)) {
                 return [
                     'success' => false,
                     'message' => 'Account is temporarily locked. Please try again later.'
                 ];
             }
+
+            // Get user from database
+            $sql = "SELECT id, name, email, password, role, status, email_verified 
+                    FROM users WHERE email = ?";
             
-            // Prepare SQL statement
-            $sql = "SELECT * FROM users WHERE (email = ? OR username = ?) AND role = ?";
             $stmt = mysqli_prepare($this->conn, $sql);
-            
-            if (!$stmt) {
-                throw new Exception("Failed to prepare statement: " . mysqli_error($this->conn));
-            }
-            
-            mysqli_stmt_bind_param($stmt, "sss", $username_or_email, $username_or_email, $role);
+            mysqli_stmt_bind_param($stmt, "s", $email);
             mysqli_stmt_execute($stmt);
             $result = mysqli_stmt_get_result($stmt);
             
             if ($user = mysqli_fetch_assoc($result)) {
+                // Verify password
                 if (password_verify($password, $user['password'])) {
                     // Check if email is verified
                     if (!$user['email_verified']) {
                         return [
                             'success' => false,
-                            'message' => 'Please verify your email address before logging in.'
+                            'message' => 'Please verify your email before logging in.'
                         ];
                     }
-                    
-                    // Check if account is active
+
+                    // Check account status
                     if ($user['status'] !== 'active') {
                         return [
                             'success' => false,
                             'message' => 'Your account is not active. Please contact support.'
                         ];
                     }
+
+                    // Reset login attempts
+                    $this->resetLoginAttempts($user['id']);
+
+                    // Update last login
+                    $this->updateLastLogin($user['id']);
+
+                    // Set session variables
+                    $_SESSION['user_id'] = $user['id'];
+                    $_SESSION['user_role'] = $user['role'];
+                    $_SESSION['logged_in'] = true;
+                    $_SESSION['page_token'] = bin2hex(random_bytes(32));
+
+                    return [
+                        'success' => true,
+                        'message' => 'Login successful',
+                        'user' => [
+                            'id' => $user['id'],
+                            'name' => $user['name'],
+                            'email' => $user['email'],
+                            'role' => $user['role']
+                        ]
+                    ];
+                } else {
+                    // Log failed attempt
+                    $this->logFailedAttempt($email);
+                    $this->incrementLoginAttempts($user['id']);
                     
-                    // Complete login directly without OTP
-                    if ($this->completeLogin($user['email'])) {
-                        // Log successful login
-                        $this->logAudit($user['id'], 'login', 'User logged in successfully');
-                        
-                        return [
-                            'success' => true,
-                            'requires_otp' => false,
-                            'message' => 'Login successful!'
-                        ];
-                    }
+                    return [
+                        'success' => false,
+                        'message' => 'Invalid email or password'
+                    ];
                 }
+            } else {
+                return [
+                    'success' => false,
+                    'message' => 'Invalid email or password'
+                ];
             }
-            
-            // Log failed login attempt
-            if (isset($user['id'])) {
-                $this->logAudit($user['id'], 'login_attempt', 'Login attempt failed - Invalid password');
-            }
-            
-            return [
-                'success' => false,
-                'message' => 'Invalid username/email or password.'
-            ];
-            
         } catch (Exception $e) {
             error_log("Login error: " . $e->getMessage());
             return [
                 'success' => false,
-                'message' => 'An error occurred during login. Please try again.'
+                'message' => 'An error occurred during login'
             ];
         }
     }
 
-    public function verifyOTP($email, $otp, $purpose) {
+    public function googleLogin($googleUser) {
         try {
-            // Get the latest OTP
-            $sql = "SELECT * FROM otp_verification 
-                    WHERE email = ? AND purpose = ? AND is_used = FALSE 
-                    AND expires_at > NOW() 
-                    ORDER BY created_at DESC LIMIT 1";
+            // Check if user exists
+            $sql = "SELECT id, name, email, role, status, email_verified 
+                    FROM users WHERE email = ?";
             
             $stmt = mysqli_prepare($this->conn, $sql);
-            mysqli_stmt_bind_param($stmt, "ss", $email, $purpose);
+            mysqli_stmt_bind_param($stmt, "s", $googleUser['email']);
             mysqli_stmt_execute($stmt);
             $result = mysqli_stmt_get_result($stmt);
             
-            if (!$otp_data = mysqli_fetch_assoc($result)) {
-                return ['success' => false, 'message' => 'Invalid or expired verification code'];
-            }
+            if ($user = mysqli_fetch_assoc($result)) {
+                // Check account status
+                if ($user['status'] !== 'active') {
+                    return [
+                        'success' => false,
+                        'message' => 'Your account is not active. Please contact support.'
+                    ];
+                }
 
-            // Check attempts
-            if ($otp_data['attempts'] >= 3) {
-                return ['success' => false, 'message' => 'Too many attempts. Please request a new code'];
-            }
+                // Update last login
+                $this->updateLastLogin($user['id']);
 
-            // Verify OTP
-            if ($otp_data['otp'] !== $otp) {
-                // Increment attempts
-                $sql = "UPDATE otp_verification SET attempts = attempts + 1 WHERE id = ?";
-                $stmt = mysqli_prepare($this->conn, $sql);
-                mysqli_stmt_bind_param($stmt, "i", $otp_data['id']);
-                mysqli_stmt_execute($stmt);
-
-                return ['success' => false, 'message' => 'Invalid verification code'];
-            }
-
-            // Mark OTP as used
-            $sql = "UPDATE otp_verification SET is_used = TRUE WHERE id = ?";
-            $stmt = mysqli_prepare($this->conn, $sql);
-            mysqli_stmt_bind_param($stmt, "i", $otp_data['id']);
-            mysqli_stmt_execute($stmt);
-
-            // Handle different purposes
-            switch ($purpose) {
-                case 'registration':
-                    return $this->completeRegistration($email);
-                case 'login':
-                    return $this->completeLogin($email);
-                case 'password_reset':
-                    return $this->completePasswordReset($email);
-                default:
-                    return ['success' => false, 'message' => 'Invalid verification purpose'];
-            }
-
-        } catch (Exception $e) {
-            error_log("OTP verification error: " . $e->getMessage());
-            return ['success' => false, 'message' => 'Verification failed. Please try again.'];
-        }
-    }
-
-    private function completeRegistration($email) {
-        try {
-            $user = $this->getUserByEmail($email);
-            if (!$user) {
-                return ['success' => false, 'message' => 'User not found'];
-            }
-
-            // Update user status to active and mark email as verified
-            $sql = "UPDATE users SET 
-                    status = 'active',
-                    email_verified = TRUE,
-                    verification_token = NULL 
-                    WHERE id = ?";
-            
-            $stmt = mysqli_prepare($this->conn, $sql);
-            mysqli_stmt_bind_param($stmt, "i", $user['id']);
-            
-            if (!mysqli_stmt_execute($stmt)) {
-                throw new Exception("Failed to complete registration");
-            }
-
-            // Create session
-            $session_token = $this->createSession($user['id']);
-
-            // Log successful registration
-            $this->logAudit($user['id'], 'registration_complete', 'Email verification completed');
-
-            // Send welcome email
-            $this->emailHandler->sendWelcome($email, $user['name']);
-
-            // Set session data
-            $_SESSION['user'] = [
-                'id' => $user['id'],
-                'name' => $user['name'],
-                'email' => $user['email'],
-                'role' => $user['role'],
-                'session_token' => $session_token
-            ];
-
-            return [
-                'success' => true,
-                'message' => 'Registration completed successfully',
-                'user' => [
-                    'id' => $user['id'],
-                    'name' => $user['name'],
-                    'email' => $user['email'],
-                    'role' => $user['role']
-                ]
-            ];
-        } catch (Exception $e) {
-            error_log("Registration completion error: " . $e->getMessage());
-            return ['success' => false, 'message' => 'Failed to complete registration'];
-        }
-    }
-
-    private function completePasswordReset($email) {
-        try {
-            $user = $this->getUserByEmail($email);
-            if (!$user) {
-                return ['success' => false, 'message' => 'User not found'];
-            }
-
-            // Clear password reset token
-            $sql = "UPDATE users SET 
-                    password_reset_token = NULL,
-                    password_reset_expires = NULL 
-                    WHERE id = ?";
-            
-            $stmt = mysqli_prepare($this->conn, $sql);
-            mysqli_stmt_bind_param($stmt, "i", $user['id']);
-            
-            if (!mysqli_stmt_execute($stmt)) {
-                throw new Exception("Failed to complete password reset");
-            }
-
-            // Log password reset completion
-            $this->logAudit($user['id'], 'password_reset_complete', 'Password reset completed');
-
-            return [
-                'success' => true,
-                'message' => 'Password reset completed successfully'
-            ];
-
-        } catch (Exception $e) {
-            error_log("Password reset completion error: " . $e->getMessage());
-            return ['success' => false, 'message' => 'Failed to complete password reset'];
-        }
-    }
-
-    private function completeLogin($email) {
-        try {
-            // Get user data
-            $sql = "SELECT id, name, username, role FROM users WHERE email = ?";
-            $stmt = mysqli_prepare($this->conn, $sql);
-            mysqli_stmt_bind_param($stmt, "s", $email);
-            mysqli_stmt_execute($stmt);
-            $result = mysqli_stmt_get_result($stmt);
-            $user = mysqli_fetch_assoc($result);
-
-            if ($user) {
                 // Set session variables
                 $_SESSION['user_id'] = $user['id'];
-                $_SESSION['logged_in'] = true;
-                $_SESSION['username'] = $user['username'];
-                $_SESSION['name'] = $user['name'];
                 $_SESSION['user_role'] = $user['role'];
+                $_SESSION['logged_in'] = true;
+                $_SESSION['page_token'] = bin2hex(random_bytes(32));
 
-                // Log successful login
-                $this->logAudit($user['id'], 'login', 'User logged in successfully');
+                return [
+                    'success' => true,
+                    'message' => 'Login successful',
+                    'user' => [
+                        'id' => $user['id'],
+                        'name' => $user['name'],
+                        'email' => $user['email'],
+                        'role' => $user['role']
+                    ]
+                ];
+            } else {
+                // Register new user
+                $name = $googleUser['name'];
+                $email = $googleUser['email'];
+                $username = explode('@', $email)[0] . rand(100, 999);
+                $password = bin2hex(random_bytes(16)); // Random password for Google users
+                
+                // Register with Google sign-in
+                $result = $this->register($name, $username, $email, $password, 'user', true);
+                
+                if ($result['success']) {
+                    // Auto-verify email for Google users
+                    $this->verifyEmail($email);
+                    
+                    // Set session variables
+                    $_SESSION['user_id'] = $result['user_id'];
+                    $_SESSION['user_role'] = 'user';
+                    $_SESSION['logged_in'] = true;
+                    $_SESSION['page_token'] = bin2hex(random_bytes(32));
 
-                // Reset login attempts
-                $sql = "UPDATE users SET login_attempts = 0, last_login = NOW() WHERE id = ?";
-                $stmt = mysqli_prepare($this->conn, $sql);
-                mysqli_stmt_bind_param($stmt, "i", $user['id']);
-                mysqli_stmt_execute($stmt);
-
-                return true;
+                    return [
+                        'success' => true,
+                        'message' => 'Registration and login successful',
+                        'user' => [
+                            'id' => $result['user_id'],
+                            'name' => $name,
+                            'email' => $email,
+                            'role' => 'user'
+                        ]
+                    ];
+                } else {
+                    return $result;
+                }
             }
-            return false;
         } catch (Exception $e) {
-            error_log("Complete login error: " . $e->getMessage());
-            return false;
+            error_log("Google login error: " . $e->getMessage());
+            return [
+                'success' => false,
+                'message' => 'An error occurred during Google login'
+            ];
         }
     }
 
-    private function createSession($user_id) {
-        $session_token = bin2hex(random_bytes(32));
-        $expires_at = date('Y-m-d H:i:s', time() + $this->session_lifetime);
-        
-        $sql = "INSERT INTO user_sessions (user_id, session_token, ip_address, user_agent, last_activity, expires_at) 
-                VALUES (?, ?, ?, ?, NOW(), ?)";
-        
-        $stmt = mysqli_prepare($this->conn, $sql);
-        $ip = $_SERVER['REMOTE_ADDR'];
-        $user_agent = $_SERVER['HTTP_USER_AGENT'];
-        
-        mysqli_stmt_bind_param($stmt, "issss", $user_id, $session_token, $ip, $user_agent, $expires_at);
-        mysqli_stmt_execute($stmt);
-        
-        return $session_token;
-    }
-
-    public function logout() {
-        try {
-            if (isset($_SESSION['user_id'])) {
-                // Log the logout action
-                $this->logAudit($_SESSION['user_id'], 'logout', 'User logged out');
-            }
-
-            // Clear all session data
-            $_SESSION = array();
-
-            // Destroy the session cookie
-            if (isset($_COOKIE[session_name()])) {
-                setcookie(session_name(), '', time() - 3600, '/');
-            }
-
-            // Destroy the session
-            session_destroy();
-
-            // Redirect to login page
-            header("Location: login.php");
-            exit();
-            
-        } catch (Exception $e) {
-            error_log("Logout error: " . $e->getMessage());
-            // Even if there's an error, try to redirect to login
-            header("Location: login.php");
-            exit();
-        }
-    }
-
-    public function isLoggedIn() {
-        if (!isset($_SESSION['user']['session_token'])) {
-            return false;
-        }
-
-        // Verify session
-        $sql = "SELECT * FROM user_sessions 
-                WHERE session_token = ? AND user_id = ? 
-                AND is_active = TRUE AND expires_at > NOW()";
-        
-        $stmt = mysqli_prepare($this->conn, $sql);
-        mysqli_stmt_bind_param($stmt, "si", $_SESSION['user']['session_token'], $_SESSION['user']['id']);
-        mysqli_stmt_execute($stmt);
-        $result = mysqli_stmt_get_result($stmt);
-
-        if (!$session = mysqli_fetch_assoc($result)) {
-            $this->logout();
-            return false;
-        }
-
-        // Update last activity
-        $sql = "UPDATE user_sessions SET last_activity = NOW() WHERE id = ?";
-        $stmt = mysqli_prepare($this->conn, $sql);
-        mysqli_stmt_bind_param($stmt, "i", $session['id']);
-        mysqli_stmt_execute($stmt);
-
-        return true;
-    }
-
-    private function validateRegistrationInput($name, $username, $email, $password) {
+    private function validateRegistrationInput($name, $username, $email, $password, $is_google = false) {
         // Validate name
-        if (empty($name) || strlen($name) < 2 || !preg_match("/^[a-zA-Z ]*$/", $name)) {
+        if (empty($name) || strlen($name) < 2 || !preg_match('/^[a-zA-Z ]*$/', $name)) {
             return false;
         }
 
-        // Validate username
-        if (empty($username) || !preg_match('/^[a-zA-Z0-9_]{3,20}$/', $username)) {
-            return false;
+        // For Google sign-in, username must be email
+        if ($is_google) {
+            if ($username !== $email) {
+                return false;
+            }
+        } else {
+            // Regular username validation
+            if (empty($username) || strlen($username) < 3 || !preg_match('/^[a-zA-Z0-9_]*$/', $username)) {
+                return false;
+            }
         }
 
         // Validate email
@@ -469,13 +337,16 @@ class Auth {
             return false;
         }
 
-        // Validate password
-        if (empty($password) || strlen($password) < 8 ||
-            !preg_match('/[A-Z]/', $password) || // uppercase
-            !preg_match('/[a-z]/', $password) || // lowercase
-            !preg_match('/[0-9]/', $password) || // number
-            !preg_match('/[^A-Za-z0-9]/', $password)) { // special char
-            return false;
+        // For Google sign-in, skip password validation
+        if (!$is_google) {
+            // Validate password
+            if (empty($password) || strlen($password) < 8 || 
+                !preg_match('/[A-Z]/', $password) || 
+                !preg_match('/[a-z]/', $password) || 
+                !preg_match('/[0-9]/', $password) || 
+                !preg_match('/[^A-Za-z0-9]/', $password)) {
+                return false;
+            }
         }
 
         return true;
@@ -499,48 +370,18 @@ class Auth {
         return mysqli_stmt_num_rows($stmt) > 0;
     }
 
-    private function getUserByEmail($email) {
-        $sql = "SELECT * FROM users WHERE email = ?";
+    private function verifyEmail($email) {
+        $sql = "UPDATE users SET email_verified = 1, status = 'active' WHERE email = ?";
         $stmt = mysqli_prepare($this->conn, $sql);
         mysqli_stmt_bind_param($stmt, "s", $email);
-        mysqli_stmt_execute($stmt);
-        $result = mysqli_stmt_get_result($stmt);
-        return mysqli_fetch_assoc($result);
+        return mysqli_stmt_execute($stmt);
     }
 
-    private function generateOTP($email, $purpose) {
-        try {
-            // Generate a 6-digit OTP
-            $otp = str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT);
-            
-            // Store OTP in database
-            $sql = "INSERT INTO otp_verification (email, otp, purpose, created_at) 
-                    VALUES (?, ?, ?, NOW())
-                    ON DUPLICATE KEY UPDATE 
-                    otp = VALUES(otp),
-                    purpose = VALUES(purpose),
-                    created_at = VALUES(created_at),
-                    attempts = 0,
-                    is_used = FALSE";
-            
-            $stmt = mysqli_prepare($this->conn, $sql);
-            mysqli_stmt_bind_param($stmt, "sss", $email, $otp, $purpose);
-            
-            if (!mysqli_stmt_execute($stmt)) {
-                throw new Exception("Failed to store OTP");
-            }
-            
-            // Send OTP via email
-            if (!$this->emailHandler->sendOTP($email, $otp, $purpose)) {
-                throw new Exception("Failed to send OTP email");
-            }
-            
-            return $otp;
-            
-        } catch (Exception $e) {
-            error_log("OTP generation error: " . $e->getMessage());
-            return false;
-        }
+    private function updateLastLogin($user_id) {
+        $sql = "UPDATE users SET last_login = NOW() WHERE id = ?";
+        $stmt = mysqli_prepare($this->conn, $sql);
+        mysqli_stmt_bind_param($stmt, "i", $user_id);
+        mysqli_stmt_execute($stmt);
     }
 
     private function isAccountLocked($email) {
@@ -581,205 +422,205 @@ class Auth {
         mysqli_stmt_execute($stmt);
     }
 
-    private function logAudit($user_id, $action, $description) {
-        $sql = "INSERT INTO audit_log (user_id, action, description, ip_address, user_agent) 
-                VALUES (?, ?, ?, ?, ?)";
-        
-        $stmt = mysqli_prepare($this->conn, $sql);
-        $ip = $_SERVER['REMOTE_ADDR'];
-        $user_agent = $_SERVER['HTTP_USER_AGENT'];
-        
-        mysqli_stmt_bind_param($stmt, "issss", $user_id, $action, $description, $ip, $user_agent);
-        mysqli_stmt_execute($stmt);
+    public function logout() {
+        // Unset all session variables
+        $_SESSION = array();
+
+        // Destroy the session
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_destroy();
+        }
+
+        // Redirect to login page
+        header("Location: login.php");
+        exit();
     }
 
-    public function changePassword($user_id, $current_password, $new_password) {
+    public function generateAndSendOTP($email, $purpose) {
         try {
-            // Get user
-            $sql = "SELECT password FROM users WHERE id = ?";
+            // Generate 6-digit OTP
+            $otp = str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+            
+            // First, delete any existing OTP for this email and purpose
+            $delete_sql = "DELETE FROM otp_verification WHERE email = ? AND purpose = ?";
+            $delete_stmt = mysqli_prepare($this->conn, $delete_sql);
+            mysqli_stmt_bind_param($delete_stmt, "ss", $email, $purpose);
+            mysqli_stmt_execute($delete_stmt);
+            
+            // Now insert the new OTP
+            $sql = "INSERT INTO otp_verification (email, otp, purpose, created_at, expires_at) 
+                    VALUES (?, ?, ?, NOW(), DATE_ADD(NOW(), INTERVAL 10 MINUTE))";
+            
             $stmt = mysqli_prepare($this->conn, $sql);
-            mysqli_stmt_bind_param($stmt, "i", $user_id);
-            mysqli_stmt_execute($stmt);
-            $result = mysqli_stmt_get_result($stmt);
-            $user = mysqli_fetch_assoc($result);
-
-            if (!$user || !password_verify($current_password, $user['password'])) {
-                return ['success' => false, 'message' => 'Current password is incorrect'];
-            }
-
-            // Validate new password
-            if (!$this->validatePassword($new_password)) {
-                return ['success' => false, 'message' => 'New password does not meet requirements'];
-            }
-
-            // Update password
-            $hashed_password = password_hash($new_password, PASSWORD_DEFAULT);
-            $sql = "UPDATE users SET password = ? WHERE id = ?";
-            $stmt = mysqli_prepare($this->conn, $sql);
-            mysqli_stmt_bind_param($stmt, "si", $hashed_password, $user_id);
+            mysqli_stmt_bind_param($stmt, "sss", $email, $otp, $purpose);
             
             if (mysqli_stmt_execute($stmt)) {
-                $this->logAudit($user_id, 'password_change', 'Password changed successfully');
-                return ['success' => true, 'message' => 'Password changed successfully'];
+                // Send OTP via email
+                if ($this->emailHandler->sendOTPEmail($email, $otp)) {
+                    return [
+                        'success' => true,
+                        'message' => 'OTP sent successfully'
+                    ];
+                }
             }
-
-            return ['success' => false, 'message' => 'Failed to change password'];
-
+            
+            return [
+                'success' => false,
+                'message' => 'Failed to send OTP'
+            ];
         } catch (Exception $e) {
-            error_log("Password change error: " . $e->getMessage());
-            return ['success' => false, 'message' => 'Failed to change password'];
+            error_log("OTP generation error: " . $e->getMessage());
+            return [
+                'success' => false,
+                'message' => 'An error occurred while generating OTP'
+            ];
         }
     }
 
-    private function validatePassword($password) {
-        return strlen($password) >= 8 &&
-               preg_match('/[A-Z]/', $password) &&
-               preg_match('/[a-z]/', $password) &&
-               preg_match('/[0-9]/', $password) &&
-               preg_match('/[^A-Za-z0-9]/', $password);
-    }
-
-    public function requestPasswordReset($email) {
+    public function verifyOTP($email, $otp, $purpose) {
         try {
-            $user = $this->getUserByEmail($email);
-            if (!$user) {
-                return ['success' => false, 'message' => 'Email not found'];
-            }
-
-            // Generate reset token
-            $token = bin2hex(random_bytes(32));
-            $expires = date('Y-m-d H:i:s', strtotime('+1 hour'));
-            
-            // Store reset token
-            $sql = "UPDATE users SET 
-                    reset_token = ?,
-                    reset_token_expires = ?
-                    WHERE id = ?";
+            // Get the most recent OTP for this email and purpose
+            $sql = "SELECT otp, created_at, is_used 
+                    FROM otp_verification 
+                    WHERE email = ? AND purpose = ? 
+                    AND created_at > DATE_SUB(NOW(), INTERVAL 10 MINUTE)
+                    AND is_used = FALSE 
+                    ORDER BY created_at DESC LIMIT 1";
             
             $stmt = mysqli_prepare($this->conn, $sql);
-            mysqli_stmt_bind_param($stmt, "ssi", $token, $expires, $user['id']);
-            
-            if (!mysqli_stmt_execute($stmt)) {
-                throw new Exception("Failed to store reset token");
-            }
-
-            // Send reset email
-            if (!$this->emailHandler->sendPasswordReset($email, $token)) {
-                throw new Exception("Failed to send reset email");
-            }
-
-            return ['success' => true, 'message' => 'Password reset instructions sent to your email'];
-            
-        } catch (Exception $e) {
-            error_log("Password reset request error: " . $e->getMessage());
-            return ['success' => false, 'message' => 'Failed to process password reset request'];
-        }
-    }
-
-    public function resetPassword($token, $new_password) {
-        try {
-            // Validate token
-            $sql = "SELECT id FROM users 
-                    WHERE password_reset_token = ? 
-                    AND password_reset_expires > NOW()";
-            
-            $stmt = mysqli_prepare($this->conn, $sql);
-            mysqli_stmt_bind_param($stmt, "s", $token);
+            mysqli_stmt_bind_param($stmt, "ss", $email, $purpose);
             mysqli_stmt_execute($stmt);
             $result = mysqli_stmt_get_result($stmt);
             
-            if (!$user = mysqli_fetch_assoc($result)) {
-                return ['success' => false, 'message' => 'Invalid or expired reset token'];
+            if ($row = mysqli_fetch_assoc($result)) {
+                // Verify OTP
+                if ($row['otp'] === $otp) {
+                    // Mark OTP as used
+                    $update_sql = "UPDATE otp_verification SET is_used = TRUE WHERE email = ? AND otp = ? AND purpose = ?";
+                    $update_stmt = mysqli_prepare($this->conn, $update_sql);
+                    mysqli_stmt_bind_param($update_stmt, "sss", $email, $otp, $purpose);
+                    mysqli_stmt_execute($update_stmt);
+                    
+                    // Handle different purposes
+                    switch ($purpose) {
+                        case 'registration':
+                            // Verify email and activate user
+                            $update_user = "UPDATE users SET email_verified = 1, status = 'active' WHERE email = ?";
+                            $update_stmt = mysqli_prepare($this->conn, $update_user);
+                            mysqli_stmt_bind_param($update_stmt, "s", $email);
+                            mysqli_stmt_execute($update_stmt);
+                            
+                            // Clear temporary auth data
+                            unset($_SESSION['temp_auth']);
+                            
+                            return [
+                                'success' => true,
+                                'message' => 'Email verified successfully. You can now login.'
+                            ];
+                            
+                        case 'login':
+                            return [
+                                'success' => true,
+                                'message' => 'Login verified successfully'
+                            ];
+                            
+                        case 'password_reset':
+                            // Generate password reset token
+                            $token = bin2hex(random_bytes(32));
+                            $update_sql = "UPDATE users SET 
+                                         password_reset_token = ?, 
+                                         password_reset_expires = DATE_ADD(NOW(), INTERVAL 1 HOUR) 
+                                         WHERE email = ?";
+                            $update_stmt = mysqli_prepare($this->conn, $update_sql);
+                            mysqli_stmt_bind_param($update_stmt, "ss", $token, $email);
+                            mysqli_stmt_execute($update_stmt);
+                            
+                            return [
+                                'success' => true,
+                                'message' => 'Password reset verified',
+                                'token' => $token
+                            ];
+                            
+                        default:
+                            return [
+                                'success' => false,
+                                'message' => 'Invalid verification purpose'
+                            ];
+                    }
+                }
             }
-
-            // Validate new password
-            if (!$this->validatePassword($new_password)) {
-                return ['success' => false, 'message' => 'New password does not meet requirements'];
-            }
-
-            // Update password
-            $hashed_password = password_hash($new_password, PASSWORD_DEFAULT);
-            $sql = "UPDATE users SET 
-                    password = ?, 
-                    password_reset_token = NULL, 
-                    password_reset_expires = NULL 
-                    WHERE id = ?";
             
-            $stmt = mysqli_prepare($this->conn, $sql);
-            mysqli_stmt_bind_param($stmt, "si", $hashed_password, $user['id']);
-            
-            if (mysqli_stmt_execute($stmt)) {
-                $this->logAudit($user['id'], 'password_reset', 'Password reset successfully');
-                return ['success' => true, 'message' => 'Password reset successfully'];
-            }
-
-            return ['success' => false, 'message' => 'Failed to reset password'];
-
+            return [
+                'success' => false,
+                'message' => 'Invalid or expired verification code'
+            ];
         } catch (Exception $e) {
-            error_log("Password reset error: " . $e->getMessage());
-            return ['success' => false, 'message' => 'Failed to reset password'];
+            error_log("OTP verification error: " . $e->getMessage());
+            return [
+                'success' => false,
+                'message' => 'An error occurred during verification'
+            ];
         }
     }
 
-    /**
-     * Check if an email already exists in the database
-     * @param string $email The email to check
-     * @return array ['exists' => bool, 'message' => string]
-     */
-    public function checkEmailExists($email) {
-        $sql = "SELECT id FROM users WHERE email = ?";
-        if ($stmt = mysqli_prepare($this->conn, $sql)) {
-            mysqli_stmt_bind_param($stmt, "s", $email);
-            if (mysqli_stmt_execute($stmt)) {
-                mysqli_stmt_store_result($stmt);
-                $exists = mysqli_stmt_num_rows($stmt) > 0;
-                mysqli_stmt_close($stmt);
-                return [
-                    'exists' => $exists,
-                    'message' => $exists ? 'Email already registered' : 'Email available'
-                ];
+    public function verifyEmailToken($token) {
+        try {
+            // First check if token exists and is not expired
+            $sql = "SELECT user_id, created_at FROM email_verification 
+                   WHERE token = ? AND is_verified = 0 
+                   AND created_at > DATE_SUB(NOW(), INTERVAL 24 HOUR)";
+            
+            if ($stmt = mysqli_prepare($this->conn, $sql)) {
+                mysqli_stmt_bind_param($stmt, "s", $token);
+                mysqli_stmt_execute($stmt);
+                $result = mysqli_stmt_get_result($stmt);
+                
+                if ($row = mysqli_fetch_assoc($result)) {
+                    // Token is valid, update user and verification status
+                    mysqli_begin_transaction($this->conn);
+                    
+                    try {
+                        // Update user's email_verified status
+                        $update_user = "UPDATE users SET email_verified = 1 
+                                      WHERE id = ?";
+                        $stmt = mysqli_prepare($this->conn, $update_user);
+                        mysqli_stmt_bind_param($stmt, "i", $row['user_id']);
+                        mysqli_stmt_execute($stmt);
+                        
+                        // Mark token as verified
+                        $update_token = "UPDATE email_verification 
+                                       SET is_verified = 1, verified_at = NOW() 
+                                       WHERE token = ?";
+                        $stmt = mysqli_prepare($this->conn, $update_token);
+                        mysqli_stmt_bind_param($stmt, "s", $token);
+                        mysqli_stmt_execute($stmt);
+                        
+                        mysqli_commit($this->conn);
+                        return ['success' => true, 'message' => 'Email verified successfully'];
+                    } catch (Exception $e) {
+                        mysqli_rollback($this->conn);
+                        error_log("Error verifying email: " . $e->getMessage());
+                        return ['success' => false, 'message' => 'Error verifying email. Please try again.'];
+                    }
+                } else {
+                    return ['success' => false, 'message' => 'Invalid or expired verification link.'];
+                }
             }
+            
+            return ['success' => false, 'message' => 'Error processing verification.'];
+        } catch (Exception $e) {
+            error_log("Error in verifyEmailToken: " . $e->getMessage());
+            return ['success' => false, 'message' => 'An error occurred. Please try again.'];
         }
-        return [
-            'exists' => false,
-            'message' => 'Error checking email'
-        ];
     }
 
-    private function isTwoFactorEnabled($user_id) {
-        $sql = "SELECT two_factor_enabled FROM user_preferences WHERE user_id = ?";
-        $stmt = mysqli_prepare($this->conn, $sql);
-        mysqli_stmt_bind_param($stmt, "i", $user_id);
-        mysqli_stmt_execute($stmt);
-        $result = mysqli_stmt_get_result($stmt);
-        if ($row = mysqli_fetch_assoc($result)) {
-            return (bool)$row['two_factor_enabled'];
-        }
-        return true; // Default to true if no preference is set
-    }
-
-    private function logFailedLogin($username_or_email) {
-        $ip = $_SERVER['REMOTE_ADDR'];
-        $user_agent = $_SERVER['HTTP_USER_AGENT'];
-        
-        // Log to audit log
-        $sql = "INSERT INTO audit_log (action, description, ip_address, user_agent, created_at) 
-                VALUES ('failed_login', ?, ?, ?, NOW())";
-        $stmt = mysqli_prepare($this->conn, $sql);
-        $description = "Failed login attempt for " . ($username_or_email);
-        mysqli_stmt_bind_param($stmt, "sss", $description, $ip, $user_agent);
-        mysqli_stmt_execute($stmt);
-        
-        // Update login attempts if user exists
-        $is_email = filter_var($username_or_email, FILTER_VALIDATE_EMAIL);
-        $sql = "UPDATE users SET login_attempts = login_attempts + 1 
-                WHERE " . ($is_email ? "email = ?" : "username = ?");
-        $stmt = mysqli_prepare($this->conn, $sql);
-        mysqli_stmt_bind_param($stmt, "s", $username_or_email);
-        mysqli_stmt_execute($stmt);
+    public function getUserByEmail($email) {
+        $sql = "SELECT * FROM users WHERE email = ?";
+        $stmt = $this->conn->prepare($sql);
+        $stmt->bind_param("s", $email);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        return $result->fetch_assoc();
     }
 }
-
-// Initialize Auth class
-$auth = new Auth($conn);
 ?> 

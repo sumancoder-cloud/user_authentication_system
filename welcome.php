@@ -8,6 +8,12 @@ securePage();
 // Validate page access
 validatePageAccess();
 
+// Add cache control headers
+header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
+header("Cache-Control: post-check=0, pre-check=0", false);
+header("Pragma: no-cache");
+header("Expires: Sat, 26 Jul 1997 05:00:00 GMT"); // Date in the past
+
 // Get user information
 $user_id = $_SESSION['user_id'];
 $sql = "SELECT name, username, email, created_at FROM users WHERE id = ?";
@@ -62,39 +68,75 @@ $display_name = $user['username'] ?? $user['name'] ?? $user['email'];
                 }
             }
 
-            // Function to hide back button
-            function hideBackButton() {
-                // Replace the current history entry
-                window.history.replaceState(null, '', currentUrl);
-                
-                // Clear all previous history entries
+            // Function to show warning and prevent navigation
+            function showWarningAndPreventNavigation() {
+                alert('Navigation is disabled for security reasons. Please use the logout button to leave this page.');
+                window.history.pushState(null, '', currentUrl);
+                window.history.pushState(null, '', currentUrl);
+                window.history.pushState(null, '', currentUrl);
+                return false;
+            }
+
+            // Function to prevent navigation
+            function preventNavigation() {
+                // Initial history states
+                window.history.pushState(null, '', currentUrl);
+                window.history.pushState(null, '', currentUrl);
                 window.history.pushState(null, '', currentUrl);
                 
-                // Prevent any new history entries
-                window.addEventListener('popstate', function(event) {
-                    window.history.pushState(null, '', currentUrl);
-                });
+                // Handle back button
+                window.onpopstate = function(event) {
+                    showWarningAndPreventNavigation();
+                };
 
-                // Disable backspace key navigation
-                document.addEventListener('keydown', function(e) {
-                    if (e.key === 'Backspace' && !['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+                // Handle beforeunload
+                window.onbeforeunload = function(e) {
+                    showWarningAndPreventNavigation();
+                    e.preventDefault();
+                    e.returnValue = '';
+                    return '';
+                };
+
+                // Block all link clicks except logout and dashboard
+                document.onclick = function(e) {
+                    const link = e.target.closest('a');
+                    if (link) {
+                        if (link.href.includes('logout.php') || link.href.includes('dashboard.php')) {
+                            return true;
+                        }
                         e.preventDefault();
+                        showWarningAndPreventNavigation();
                     }
-                });
+                };
 
-                // Override history methods to prevent back button
+                // Disable navigation keys
+                document.onkeydown = function(e) {
+                    // Prevent Alt+Left (back) and Alt+Right (forward)
+                    if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+                        e.preventDefault();
+                        showWarningAndPreventNavigation();
+                    }
+                };
+
+                // Override history methods
                 const originalPushState = window.history.pushState;
+                const originalReplaceState = window.history.replaceState;
+
                 window.history.pushState = function() {
+                    arguments[2] = currentUrl;
                     originalPushState.apply(this, arguments);
-                    // Clear any previous history
-                    window.history.replaceState(null, '', currentUrl);
+                };
+
+                window.history.replaceState = function() {
+                    arguments[2] = currentUrl;
+                    originalReplaceState.apply(this, arguments);
                 };
             }
 
             // Initialize everything when the page loads
-            document.addEventListener('DOMContentLoaded', function() {
-                // Hide back button immediately
-                hideBackButton();
+            window.onload = function() {
+                // Prevent navigation immediately
+                preventNavigation();
                 
                 // Start periodic session validation
                 setInterval(validateSession, 3000);
@@ -111,12 +153,17 @@ $display_name = $user['username'] ?? $user['name'] ?? $user['email'];
                         welcomeContainer.style.transform = 'translateY(0)';
                     }, 100);
                 }
-            });
 
-            // Also hide back button when page is shown
+                // Additional protection
+                window.history.pushState(null, '', currentUrl);
+                window.history.pushState(null, '', currentUrl);
+                window.history.pushState(null, '', currentUrl);
+            };
+
+            // Additional protection against browser back/forward
             window.addEventListener('pageshow', function(event) {
                 if (event.persisted) {
-                    hideBackButton();
+                    showWarningAndPreventNavigation();
                 }
             });
         })();

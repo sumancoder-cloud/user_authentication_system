@@ -1,149 +1,250 @@
 <?php
-session_start();
+require_once 'config.php';
+require_once 'auth.php';
 
-// Check if temp_auth session is set
-if (!isset($_SESSION['temp_auth']) || !isset($_SESSION['temp_auth']['email'])) {
-    header('Location: signup.php');
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Check if user is in registration process
+if (!isset($_SESSION['temp_auth']) || $_SESSION['temp_auth']['purpose'] !== 'registration') {
+    header("Location: signup.php");
     exit();
 }
+
 $email = $_SESSION['temp_auth']['email'];
+$error_message = '';
+$success_message = '';
+
+// Handle OTP verification
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (isset($_POST['verify_otp'])) {
+        // Get OTP from input array and combine into single string
+        $otpArray = $_POST['otp'] ?? [];
+        $otp = implode('', $otpArray);
+        
+        if (empty($otp) || strlen($otp) !== 6) {
+            $error_message = 'Please enter a valid 6-digit verification code';
+        } else {
+            // Initialize Auth class
+            $auth = new Auth($conn);
+            
+            // Verify OTP
+            $result = $auth->verifyOTP($email, $otp, 'registration');
+            
+            if ($result['success']) {
+                // Store success message in session
+                $_SESSION['success_message'] = $result['message'];
+                
+                // Redirect to login page
+                header("Location: login.php");
+                exit();
+            } else {
+                $error_message = $result['message'];
+            }
+        }
+    } elseif (isset($_POST['resend_otp'])) {
+        // Initialize Auth class
+        $auth = new Auth($conn);
+        
+        // Generate and send new OTP
+        $result = $auth->generateAndSendOTP($email, 'registration');
+        
+        if ($result['success']) {
+            $success_message = 'A new verification code has been sent to your email';
+        } else {
+            $error_message = $result['message'];
+        }
+    }
+}
 ?>
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Verify Your Email - OTP</title>
+    <title>Verify Email - Addwise</title>
     <link rel="stylesheet" href="form.css">
     <style>
-        body { background: #1a1a2e; color: #fff; font-family: 'Segoe UI', sans-serif; }
-        .form-container { max-width: 400px; margin: 60px auto; background: #22223b; padding: 32px 28px; border-radius: 12px; box-shadow: 0 4px 24px rgba(0,0,0,0.2); }
-        h2 { text-align: center; margin-bottom: 18px; }
-        .otp-inputs { display: flex; gap: 10px; justify-content: center; margin: 15px 0; }
-        .otp-inputs input { width: 40px; height: 40px; text-align: center; font-size: 18px; border: 1px solid #ddd; border-radius: 4px; background: #1a1a2e; color: white; }
-        .otp-inputs input:focus { border-color: #ffcc00; outline: none; }
-        .error-message { color: #dc3545; background: #f8d7da; border: 1px solid #f5c6cb; padding: 10px; border-radius: 4px; margin-bottom: 15px; display: none; }
-        .success-message { color: #28a745; background: #d4edda; border: 1px solid #c3e6cb; padding: 10px; border-radius: 4px; margin-bottom: 15px; display: none; }
-        button[type="submit"] { width: 100%; padding: 12px; background: #ffcc00; color: black; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; transition: all 0.3s; margin-top: 20px; font-size: 16px; text-transform: uppercase; letter-spacing: 1px; }
-        button[type="submit"]:hover { background: #fff; transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.2); }
-        button[type="submit"]:disabled { background: #ccc; cursor: not-allowed; transform: none; box-shadow: none; }
-        .resend-timer { text-align: center; color: #aaa; font-size: 14px; margin: 10px 0; }
-        .back-link { text-align: center; margin-top: 10px; }
-        .back-link a { color: #ffcc00; text-decoration: none; }
-        .back-link a:hover { text-decoration: underline; }
+        .otp-container {
+            max-width: 400px;
+            margin: 50px auto;
+            padding: 30px;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.1);
+        }
+        
+        .otp-inputs {
+            display: flex;
+            justify-content: space-between;
+            margin: 20px 0;
+        }
+        
+        .otp-inputs input {
+            width: 50px;
+            height: 50px;
+            text-align: center;
+            font-size: 24px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            margin: 0 5px;
+            background: #1a1a2e;
+            color: white;
+        }
+        
+        .otp-inputs input:focus {
+            border-color: #4CAF50;
+            outline: none;
+        }
+        
+        .error-message {
+            color: #dc3545;
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            padding: 10px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+            display: <?php echo !empty($error_message) ? 'block' : 'none'; ?>;
+        }
+        
+        .success-message {
+            color: #155724;
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            padding: 10px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+            display: <?php echo !empty($success_message) ? 'block' : 'none'; ?>;
+        }
+        
+        .verify-button {
+            width: 100%;
+            padding: 12px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        
+        .verify-button:hover {
+            background: #45a049;
+        }
+        
+        .resend-button {
+            width: 100%;
+            padding: 12px;
+            background: #6c757d;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+            margin-top: 10px;
+        }
+        
+        .resend-button:hover {
+            background: #5a6268;
+        }
+        
+        .email-display {
+            color: #666;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
     </style>
 </head>
 <body>
-<div class="form-container">
-    <form id="otpForm" autocomplete="off" onsubmit="return handleOTPSubmit(event)">
-        <h2>Email Verification</h2>
-        <div id="otpError" class="error-message"></div>
-        <div id="otpSuccess" class="success-message"></div>
-        <p style="text-align: center; color: #ccc; margin-bottom: 15px;">We've sent a verification code to <b><?php echo htmlspecialchars($email); ?></b></p>
-        <input type="hidden" name="email" value="<?php echo htmlspecialchars($email); ?>">
-        <div class="otp-inputs">
-            <input type="text" maxlength="1" pattern="[0-9]" inputmode="numeric" name="otp[]" required oninput="moveToNext(this)">
-            <input type="text" maxlength="1" pattern="[0-9]" inputmode="numeric" name="otp[]" required oninput="moveToNext(this)">
-            <input type="text" maxlength="1" pattern="[0-9]" inputmode="numeric" name="otp[]" required oninput="moveToNext(this)">
-            <input type="text" maxlength="1" pattern="[0-9]" inputmode="numeric" name="otp[]" required oninput="moveToNext(this)">
-            <input type="text" maxlength="1" pattern="[0-9]" inputmode="numeric" name="otp[]" required oninput="moveToNext(this)">
-            <input type="text" maxlength="1" pattern="[0-9]" inputmode="numeric" name="otp[]" required oninput="moveToNext(this)">
+    <div class="otp-container">
+        <h2>Verify Your Email</h2>
+        
+        <div class="email-display">
+            Enter the verification code sent to:<br>
+            <strong><?php echo htmlspecialchars($email); ?></strong>
         </div>
-        <button type="submit" id="verifyButton">Verify Code</button>
-        <div class="resend-timer">Resend code in <span id="timer">60</span>s</div>
-        <div class="back-link"><a href="signup.php">Back to signup</a></div>
-    </form>
-</div>
-<script>
-function moveToNext(input) {
-    if (input.value.length === 1) {
-        const next = input.nextElementSibling;
-        if (next) next.focus();
-    }
-}
-function showError(msg) {
-    const err = document.getElementById('otpError');
-    err.textContent = msg;
-    err.style.display = 'block';
-    document.getElementById('otpSuccess').style.display = 'none';
-}
-function showSuccess(msg) {
-    const succ = document.getElementById('otpSuccess');
-    succ.textContent = msg;
-    succ.style.display = 'block';
-    document.getElementById('otpError').style.display = 'none';
-}
-function resetOTPInputs() {
-    document.querySelectorAll('.otp-inputs input').forEach(i => { i.value = ''; i.disabled = false; });
-    document.querySelector('.otp-inputs input').focus();
-}
-async function handleOTPSubmit(event) {
-    event.preventDefault();
-    const form = document.getElementById('otpForm');
-    const btn = document.getElementById('verifyButton');
-    const otpInputs = document.querySelectorAll('.otp-inputs input');
-    let otp = [];
-    otpInputs.forEach(input => { otp.push(input.value.trim()); });
-    if (otp.some(d => d.length !== 1 || !/^[0-9]$/.test(d))) {
-        showError('Please enter a valid 6-digit verification code');
-        return false;
-    }
-    btn.disabled = true;
-    btn.textContent = 'Verifying...';
-    const formData = new FormData();
-    formData.append('email', form.querySelector('input[name="email"]').value);
-    otp.forEach(d => formData.append('otp[]', d));
-    try {
-        const res = await fetch('verify_otp.php', { method: 'POST', body: formData });
-        const data = await res.json();
-        if (data.success) {
-            showSuccess(data.message || 'Verification successful!');
-            otpInputs.forEach(i => { i.disabled = true; });
-            btn.style.display = 'none';
-            setTimeout(() => { window.location.href = 'welcome.php'; }, 1500);
-        } else {
-            showError(data.message || 'Invalid verification code. Please try again.');
-            btn.disabled = false;
-            btn.textContent = 'Verify Code';
-            resetOTPInputs();
+        
+        <div class="error-message">
+            <?php echo htmlspecialchars($error_message); ?>
+        </div>
+        
+        <div class="success-message">
+            <?php echo htmlspecialchars($success_message); ?>
+        </div>
+        
+        <form method="post" id="otpForm">
+            <div class="otp-inputs">
+                <?php for($i = 1; $i <= 6; $i++): ?>
+                    <input type="text" 
+                           name="otp[]" 
+                           maxlength="1" 
+                           pattern="[0-9]" 
+                           inputmode="numeric" 
+                           required 
+                           autocomplete="off"
+                           onkeyup="moveToNext(this, <?php echo $i; ?>)"
+                           onkeydown="handleBackspace(this, <?php echo $i; ?>)">
+                <?php endfor; ?>
+            </div>
+            
+            <button type="submit" name="verify_otp" class="verify-button">Verify Email</button>
+            <button type="submit" name="resend_otp" class="resend-button">Resend Code</button>
+        </form>
+    </div>
+
+    <script>
+        function moveToNext(input, currentIndex) {
+            if (input.value.length === 1) {
+                if (currentIndex < 6) {
+                    const nextInput = input.parentElement.children[currentIndex];
+                    nextInput.focus();
+                }
+            }
         }
-    } catch (e) {
-        showError('Something went wrong. Please try again.');
-        btn.disabled = false;
-        btn.textContent = 'Verify Code';
-    }
-    return false;
-}
-// Timer for resend
-let timeLeft = 60;
-const timerSpan = document.getElementById('timer');
-const timer = setInterval(() => {
-    timeLeft--;
-    timerSpan.textContent = timeLeft;
-    if (timeLeft <= 0) {
-        clearInterval(timer);
-        document.querySelector('.resend-timer').innerHTML = '<a href="#" onclick="resendOTP();return false;" style="color:#ffcc00;">Resend code</a>';
-    }
-}, 1000);
-document.querySelector('.otp-inputs input').focus();
-async function resendOTP() {
-    const email = '<?php echo htmlspecialchars($email); ?>';
-    try {
-        const res = await fetch('resend_otp.php', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'email=' + encodeURIComponent(email) });
-        const data = await res.json();
-        if (data.success) {
-            showSuccess('A new verification code has been sent.');
-            resetOTPInputs();
-            timeLeft = 60;
-            timerSpan.textContent = timeLeft;
-            document.querySelector('.resend-timer').innerHTML = 'Resend code in <span id="timer">60</span>s';
-        } else {
-            showError(data.message || 'Failed to resend code.');
+        
+        function handleBackspace(input, currentIndex) {
+            if (event.key === 'Backspace' && input.value.length === 0) {
+                if (currentIndex > 1) {
+                    const prevInput = input.parentElement.children[currentIndex - 2];
+                    prevInput.focus();
+                }
+            }
         }
-    } catch (e) {
-        showError('Failed to resend code.');
-    }
-}
-</script>
+        
+        // Auto-focus first input on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            document.querySelector('.otp-inputs input').focus();
+        });
+        
+        // Handle paste event
+        document.querySelector('.otp-inputs').addEventListener('paste', function(e) {
+            e.preventDefault();
+            const pastedData = (e.clipboardData || window.clipboardData).getData('text');
+            const numbers = pastedData.replace(/[^0-9]/g, '').split('').slice(0, 6);
+            
+            const inputs = this.querySelectorAll('input');
+            numbers.forEach((num, index) => {
+                if (inputs[index]) {
+                    inputs[index].value = num;
+                }
+            });
+            
+            if (numbers.length === 6) {
+                document.querySelector('button[name="verify_otp"]').focus();
+            } else if (inputs[numbers.length]) {
+                inputs[numbers.length].focus();
+            }
+        });
+    </script>
 </body>
-</html> 
+</html>
+<?php
+// Close connection
+mysqli_close($conn);
+?> 
